@@ -14,6 +14,8 @@ class Chunk:
     language: str
     chunk_type: str
     symbol: str
+    start_line: int
+    end_line: int
     text: str
 
 
@@ -59,6 +61,8 @@ def chunk_csharp_document(doc: SourceDocument) -> list[Chunk]:
                 language="csharp",
                 chunk_type="full",
                 symbol=_file_symbol(path),
+                start_line=1,
+                end_line=_line_number_at(text, len(text)),
                 text=text,
             )
         ]
@@ -77,12 +81,14 @@ def chunk_csharp_document(doc: SourceDocument) -> list[Chunk]:
                 language="csharp",
                 chunk_type=chunk_type,
                 symbol=symbol,
+                start_line=_line_number_at(text, start),
+                end_line=_line_number_at(text, end),
                 text=chunk_text,
             )
         )
 
         if chunk_type in {"class", "interface", "record"}:
-            chunks.extend(_extract_method_chunks(path, symbol, chunk_text, index))
+            chunks.extend(_extract_method_chunks(path, symbol, text, start, chunk_text, index))
 
     return chunks
 
@@ -123,7 +129,14 @@ def _find_matches(text: str) -> list[tuple[int, int, str, str]]:
     return results
 
 
-def _extract_method_chunks(path: str, parent_symbol: str, parent_text: str, parent_index: int) -> list[Chunk]:
+def _extract_method_chunks(
+    path: str,
+    parent_symbol: str,
+    full_text: str,
+    parent_start: int,
+    parent_text: str,
+    parent_index: int,
+) -> list[Chunk]:
     method_matches = list(METHOD_PATTERN.finditer(parent_text))
     if not method_matches:
         return []
@@ -139,6 +152,9 @@ def _extract_method_chunks(path: str, parent_symbol: str, parent_text: str, pare
         if not method_text:
             continue
 
+        abs_start = parent_start + start
+        abs_end = parent_start + end
+
         chunks.append(
             Chunk(
                 id=f"{path}::method::{parent_symbol}.{method_name}::{parent_index}_{i}",
@@ -146,6 +162,8 @@ def _extract_method_chunks(path: str, parent_symbol: str, parent_text: str, pare
                 language="csharp",
                 chunk_type="method",
                 symbol=f"{parent_symbol}.{method_name}",
+                start_line=_line_number_at(full_text, abs_start),
+                end_line=_line_number_at(full_text, abs_end),
                 text=method_text,
             )
         )
@@ -168,3 +186,11 @@ def _chunk_type_from_match(match_text: str) -> str:
 def _file_symbol(relative_path: str) -> str:
     name = relative_path.replace("\\", "/").split("/")[-1]
     return name.rsplit(".", 1)[0]
+
+
+def _line_number_at(text: str, index: int) -> int:
+    if index <= 0:
+        return 1
+    if index >= len(text):
+        return text.count("\n") + 1
+    return text.count("\n", 0, index) + 1

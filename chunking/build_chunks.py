@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-from dataclasses import asdict
 from pathlib import Path
 
 from content_loader import load_documents
@@ -10,17 +8,104 @@ from ts_chunker import chunk_ts_documents
 from csharp_chunker import chunk_csharp_documents
 
 
-def write_jsonl(path: Path, chunks: list[object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _safe_filename(relative_path: str) -> str:
+    name = relative_path.replace("\\", "/")
+    name = name.replace("/", "__")
+    name = name.replace("..", ".")
+    out = []
+    for ch in name:
+        if ch.isalnum() or ch in {"_", "-", ".", " "}:
+            out.append(ch)
+        else:
+            out.append("_")
+    return "".join(out).strip().replace(" ", "_") + ".md"
 
-    with path.open("w", encoding="utf-8") as f:
-        for chunk in chunks:
-            f.write(json.dumps(asdict(chunk), ensure_ascii=False) + "\n")
+
+def _fence_language(language: str) -> str:
+    return {
+        "typescript": "ts",
+        "javascript": "js",
+        "csharp": "csharp",
+        "vue": "vue",
+        "markdown": "md",
+    }.get(language, "")
+
+
+def _chunk_heading(chunk_type: str, symbol: str) -> str:
+    if chunk_type == "full":
+        return "## file"
+    if symbol:
+        return f"## {chunk_type}:{symbol}"
+    return f"## {chunk_type}"
+
+
+def _write_markdown_doc(output_dir: Path, doc, chunks: list[object]) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_path = output_dir / _safe_filename(doc.relative_path)
+
+    fence = _fence_language(doc.language)
+
+    lines: list[str] = []
+    lines.append(f"# {doc.relative_path}")
+    lines.append("")
+    lines.append("- language: " + doc.language)
+    lines.append("- category: " + doc.category)
+    lines.append("- tags: " + ", ".join(doc.tags))
+    if doc.sha256:
+        lines.append("- sha256: " + doc.sha256)
+    if doc.modified_utc:
+        lines.append("- modified_utc: " + doc.modified_utc)
+    lines.append("")
+
+    for chunk in chunks:
+        heading = _chunk_heading(getattr(chunk, "chunk_type", ""), getattr(chunk, "symbol", ""))
+        lines.append(heading)
+        lines.append("")
+        start_line = getattr(chunk, "start_line", 1)
+        end_line = getattr(chunk, "end_line", start_line)
+        lines.append(f"source: {doc.relative_path} (lines {start_line}-{end_line})")
+        if getattr(chunk, "symbol", ""):
+            lines.append(f"symbol: {chunk.symbol}")
+        lines.append("")
+        lines.append(f"```{fence}".rstrip())
+        lines.append(getattr(chunk, "text", "").rstrip())
+        lines.append("```")
+        lines.append("")
+
+    out_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
+def _write_repo_index(output_dir: Path, docs: list[object]) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_path = output_dir / "repo_index.md"
+
+    paths = sorted({d.relative_path for d in docs})
+    by_dir: dict[str, list[str]] = {}
+    for p in paths:
+        directory = p.rsplit("/", 1)[0] if "/" in p else "."
+        by_dir.setdefault(directory, []).append(p)
+
+    lines: list[str] = []
+    lines.append("# repo_index")
+    lines.append("")
+    lines.append(f"- file_count: {len(paths)}")
+    lines.append("")
+    lines.append("## files")
+    lines.append("")
+
+    for directory in sorted(by_dir):
+        lines.append(f"### {directory}")
+        lines.append("")
+        for p in by_dir[directory]:
+            lines.append(f"- {p}")
+        lines.append("")
+
+    out_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
 def main() -> None:
     manifest_path = Path("kb_exports/scan_manifest.json")
-    output_dir = Path("kb_exports")
+    output_dir = Path("kb_exports/openwebui")
 
     docs = load_documents(manifest_path)
 
@@ -28,22 +113,20 @@ def main() -> None:
     ts_chunks = chunk_ts_documents(docs)
     csharp_chunks = chunk_csharp_documents(docs)
 
-    all_chunks = [
-        *vue_chunks,
-        *ts_chunks,
-        *csharp_chunks,
-    ]
+    chunks_by_path: dict[str, list[object]] = {}
+    for chunk in [*vue_chunks, *ts_chunks, *csharp_chunks]:
+        chunks_by_path.setdefault(chunk.path, []).append(chunk)
 
-    write_jsonl(output_dir / "vue_chunks.jsonl", vue_chunks)
-    write_jsonl(output_dir / "ts_chunks.jsonl", ts_chunks)
-    write_jsonl(output_dir / "csharp_chunks.jsonl", csharp_chunks)
-    write_jsonl(output_dir / "all_chunks.jsonl", all_chunks)
+    for doc in docs:
+        doc_chunks = chunks_by_path.get(doc.relative_path)
+        if not doc_chunks:
+            continue
+        _write_markdown_doc(output_dir, doc, doc_chunks)
+
+    _write_repo_index(output_dir, docs)
 
     print(f"Loaded {len(docs)} documents")
-    print(f"Wrote {len(vue_chunks)} vue chunks")
-    print(f"Wrote {len(ts_chunks)} ts/js chunks")
-    print(f"Wrote {len(csharp_chunks)} csharp chunks")
-    print(f"Wrote {len(all_chunks)} total chunks")
+    print(f"Wrote markdown exports to: {output_dir.resolve()}")
 
 
 if __name__ == "__main__":

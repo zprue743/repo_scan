@@ -14,6 +14,8 @@ class Chunk:
     language: str
     chunk_type: str
     symbol: str
+    start_line: int
+    end_line: int
     text: str
 
 
@@ -34,6 +36,7 @@ def chunk_vue_document(doc: SourceDocument) -> list[Chunk]:
     style = _match_block(STYLE_RE, doc.text)
 
     if template:
+        template_text, template_start, template_end = template
         chunks.append(
             Chunk(
                 id=f"{doc.relative_path}::template",
@@ -41,11 +44,14 @@ def chunk_vue_document(doc: SourceDocument) -> list[Chunk]:
                 language="vue",
                 chunk_type="template",
                 symbol=symbol,
-                text=template,
+                start_line=_line_number_at(doc.text, template_start),
+                end_line=_line_number_at(doc.text, template_end),
+                text=template_text,
             )
         )
 
     if script:
+        script_text, script_start, script_end = script
         chunks.append(
             Chunk(
                 id=f"{doc.relative_path}::script",
@@ -53,11 +59,14 @@ def chunk_vue_document(doc: SourceDocument) -> list[Chunk]:
                 language="vue",
                 chunk_type="script",
                 symbol=symbol,
-                text=script,
+                start_line=_line_number_at(doc.text, script_start),
+                end_line=_line_number_at(doc.text, script_end),
+                text=script_text,
             )
         )
 
     if style:
+        style_text, style_start, style_end = style
         chunks.append(
             Chunk(
                 id=f"{doc.relative_path}::style",
@@ -65,7 +74,9 @@ def chunk_vue_document(doc: SourceDocument) -> list[Chunk]:
                 language="vue",
                 chunk_type="style",
                 symbol=symbol,
-                text=style,
+                start_line=_line_number_at(doc.text, style_start),
+                end_line=_line_number_at(doc.text, style_end),
+                text=style_text,
             )
         )
 
@@ -77,6 +88,8 @@ def chunk_vue_document(doc: SourceDocument) -> list[Chunk]:
                 language="vue",
                 chunk_type="full",
                 symbol=symbol,
+                start_line=1,
+                end_line=_line_number_at(doc.text, len(doc.text)),
                 text=doc.text,
             )
         )
@@ -91,15 +104,28 @@ def chunk_vue_documents(documents: Iterable[SourceDocument]) -> list[Chunk]:
     return chunks
 
 
-def _match_block(pattern: re.Pattern[str], text: str) -> str | None:
+def _match_block(pattern: re.Pattern[str], text: str) -> tuple[str, int, int] | None:
     match = pattern.search(text)
     if not match:
         return None
 
     content = match.group(1).strip()
-    return content or None
+    if not content:
+        return None
+
+    start = match.start(1)
+    end = match.end(1)
+    return (content, start, end)
 
 
 def _file_symbol(relative_path: str) -> str:
     name = relative_path.replace("\\", "/").split("/")[-1]
     return name.rsplit(".", 1)[0]
+
+
+def _line_number_at(text: str, index: int) -> int:
+    if index <= 0:
+        return 1
+    if index >= len(text):
+        return text.count("\n") + 1
+    return text.count("\n", 0, index) + 1

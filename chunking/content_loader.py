@@ -12,6 +12,8 @@ class SourceDocument:
     language: str
     category: str
     tags: list[str]
+    sha256: str
+    modified_utc: str
     text: str
 
 
@@ -56,6 +58,8 @@ def load_documents(manifest_path: str | Path) -> list[SourceDocument]:
                 language=record["language"],
                 category=record["category"],
                 tags=record["tags"],
+                sha256=record.get("sha256", ""),
+                modified_utc=record.get("modified_utc", ""),
                 text=text,
             )
         )

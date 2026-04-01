@@ -14,6 +14,8 @@ class Chunk:
     language: str
     chunk_type: str
     symbol: str
+    start_line: int
+    end_line: int
     text: str
 
 
@@ -57,6 +59,8 @@ def chunk_ts_document(doc: SourceDocument) -> list[Chunk]:
                 language=doc.language,
                 chunk_type="full",
                 symbol=_file_symbol(path),
+                start_line=1,
+                end_line=_line_number_at(text, len(text)),
                 text=text,
             )
         ]
@@ -75,6 +79,8 @@ def chunk_ts_document(doc: SourceDocument) -> list[Chunk]:
                 language=doc.language,
                 chunk_type=chunk_type,
                 symbol=symbol,
+                start_line=_line_number_at(text, start),
+                end_line=_line_number_at(text, end),
                 text=chunk_text,
             )
         )
@@ -113,7 +119,8 @@ def _find_matches(text: str) -> list[tuple[int, int, str, str]]:
 
     for i, (start, symbol, chunk_type) in enumerate(deduped):
         end = deduped[i + 1][0] if i + 1 < len(deduped) else len(text)
-        results.append((start, end, symbol, chunk_type))
+        improved_end = _improve_end(text, start, end, chunk_type)
+        results.append((start, improved_end, symbol, chunk_type))
 
     return results
 
@@ -135,3 +142,32 @@ def _chunk_type_from_match(match_text: str) -> str:
 def _file_symbol(relative_path: str) -> str:
     name = relative_path.replace("\\", "/").split("/")[-1]
     return name.rsplit(".", 1)[0]
+
+
+def _line_number_at(text: str, index: int) -> int:
+    if index <= 0:
+        return 1
+    if index >= len(text):
+        return text.count("\n") + 1
+    return text.count("\n", 0, index) + 1
+
+
+def _improve_end(text: str, start: int, next_start: int, chunk_type: str) -> int:
+    if chunk_type not in {"function", "class"}:
+        return next_start
+
+    brace_open = text.find("{", start, next_start)
+    if brace_open == -1:
+        return next_start
+
+    depth = 0
+    for i in range(brace_open, min(len(text), next_start)):
+        ch = text[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+
+    return next_start
