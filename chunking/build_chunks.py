@@ -9,6 +9,27 @@ from csharp_chunker import chunk_csharp_documents
 
 
 DEFAULT_EXPORT_MODE = "bundle"  # "bundle" (few files) or "per_file"
+BUNDLE_PART_TARGET_BYTES = 750 * 1024
+
+
+class _AdHocChunk:
+    def __init__(
+        self,
+        path: str,
+        language: str,
+        chunk_type: str,
+        symbol: str,
+        start_line: int,
+        end_line: int,
+        text: str,
+    ) -> None:
+        self.path = path
+        self.language = language
+        self.chunk_type = chunk_type
+        self.symbol = symbol
+        self.start_line = start_line
+        self.end_line = end_line
+        self.text = text
 
 
 def _safe_filename(relative_path: str) -> str:
@@ -95,27 +116,55 @@ def _bundle_key(doc) -> str | None:
 def _write_bundles(output_dir: Path, docs: list[object], chunks_by_path: dict[str, list[object]]) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    bundle_paths = {
-        "frontend": output_dir / "frontend.md",
-        "backend": output_dir / "backend.md",
-        "docs": output_dir / "docs.md",
-    }
+    def write_part(key: str, part_index: int, content: str) -> None:
+        part_path = output_dir / f"{key}_part_{part_index:03d}.md"
+        part_path.write_text(content.rstrip() + "\n", encoding="utf-8")
 
-    parts: dict[str, list[str]] = {"frontend": [], "backend": [], "docs": []}
-
-    for doc in docs:
+    docs_by_key: dict[str, list[object]] = {"frontend": [], "backend": [], "docs": []}
+    for doc in sorted(docs, key=lambda d: d.relative_path.lower()):
         key = _bundle_key(doc)
-        if not key:
-            continue
-        doc_chunks = chunks_by_path.get(doc.relative_path)
-        if not doc_chunks:
-            continue
-        parts[key].append(_render_doc_markdown(doc, doc_chunks))
+        if key in docs_by_key:
+            docs_by_key[key].append(doc)
 
-    for key, content_parts in parts.items():
-        if not content_parts:
-            continue
-        bundle_paths[key].write_text("\n".join(content_parts).rstrip() + "\n", encoding="utf-8")
+    for key, key_docs in docs_by_key.items():
+        part_index = 1
+        buf: list[str] = []
+        buf_bytes = 0
+
+        for doc in key_docs:
+            doc_chunks = chunks_by_path.get(doc.relative_path)
+            if not doc_chunks:
+                continue
+
+            section = _render_doc_markdown(doc, doc_chunks)
+            section_bytes = len(section.encode("utf-8"))
+
+            if section_bytes > BUNDLE_PART_TARGET_BYTES:
+                if buf:
+                    write_part(key, part_index, "\n".join(buf))
+                    part_index += 1
+                    buf = []
+                    buf_bytes = 0
+
+                write_part(key, part_index, section)
+                print(
+                    f"WARNING: {doc.relative_path} section is ~{section_bytes} bytes; "
+                    f"exceeds target {BUNDLE_PART_TARGET_BYTES} bytes; wrote as its own part."
+                )
+                part_index += 1
+                continue
+
+            if buf and (buf_bytes + section_bytes) > BUNDLE_PART_TARGET_BYTES:
+                write_part(key, part_index, "\n".join(buf))
+                part_index += 1
+                buf = []
+                buf_bytes = 0
+
+            buf.append(section)
+            buf_bytes += section_bytes
+
+        if buf:
+            write_part(key, part_index, "\n".join(buf))
 
 
 def _print_openwebui_settings_hint() -> None:
@@ -123,6 +172,7 @@ def _print_openwebui_settings_hint() -> None:
     print("Open WebUI settings (recommended):")
     print("- Admin Panel -> Settings -> Documents -> enable Markdown Header Splitting")
     print("- Tune Chunk Size / Overlap / Chunk Min Size Target based on your model context window")
+    print(f"- Export part target size: ~{BUNDLE_PART_TARGET_BYTES} bytes per file")
     print("")
 
 
@@ -168,6 +218,21 @@ def main() -> None:
     for chunk in [*vue_chunks, *ts_chunks, *csharp_chunks]:
         chunks_by_path.setdefault(chunk.path, []).append(chunk)
 
+    for doc in docs:
+        if doc.language == "markdown" and doc.relative_path not in chunks_by_path:
+            end_line = doc.text.count("\n") + 1 if doc.text else 1
+            chunks_by_path[doc.relative_path] = [
+                _AdHocChunk(
+                    path=doc.relative_path,
+                    language="markdown",
+                    chunk_type="full",
+                    symbol=doc.relative_path.rsplit("/", 1)[-1],
+                    start_line=1,
+                    end_line=end_line,
+                    text=doc.text,
+                )
+            ]
+
     if DEFAULT_EXPORT_MODE == "per_file":
         for doc in docs:
             doc_chunks = chunks_by_path.get(doc.relative_path)
@@ -182,7 +247,7 @@ def main() -> None:
     print(f"Loaded {len(docs)} documents")
     print(f"Wrote markdown exports to: {output_dir.resolve()}")
     if DEFAULT_EXPORT_MODE == "bundle":
-        print("Bundled exports: frontend.md, backend.md, docs.md (only if content exists)")
+        print("Bundled exports: frontend_part_###.md, backend_part_###.md, docs_part_###.md (only if content exists)")
     _print_openwebui_settings_hint()
 
 
