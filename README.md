@@ -10,10 +10,11 @@ All scanning/chunking/export is **local**. No network access is used or required
 
 Exports are written to `kb_exports/openwebui/`:
 
-- `frontend.md`: Typescript/Javascript/Vue sources (if any)
-- `backend.md`: C# sources (if any)
-- `docs.md`: Markdown docs (if any)
+- `frontend_part_###.md`: Typescript/Javascript/Vue sources (if any)
+- `backend_part_###.md`: C# sources (if any)
+- `docs_part_###.md`: Markdown docs (if any)
 - `repo_index.md`: simple file listing
+- `symbol_index.md`: symbol/chunk listing for lookup
 
 Each source file is embedded as its own `# path/to/file` section, with `## ...` subsections for symbols/parts. This preserves structure so Open WebUI’s **Markdown Header Splitting** works well.
 

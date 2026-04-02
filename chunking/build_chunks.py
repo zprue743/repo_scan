@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 from content_loader import load_documents
 from vue_chunker import chunk_vue_documents
@@ -9,7 +10,8 @@ from csharp_chunker import chunk_csharp_documents
 
 
 DEFAULT_EXPORT_MODE = "bundle"  # "bundle" (few files) or "per_file"
-BUNDLE_PART_TARGET_BYTES = 750 * 1024
+# Export bundle part size target (keep scanner max file size separate).
+BUNDLE_PART_TARGET_BYTES = 250 * 1024
 
 
 class _AdHocChunk:
@@ -63,6 +65,63 @@ def _chunk_heading(chunk_type: str, symbol: str) -> str:
     return f"## {chunk_type}"
 
 
+_NON_ALNUM_RE = re.compile(r"[^A-Za-z0-9]+")
+_CAMEL_RE = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+")
+
+
+def _iter_keyword_tokens(text: str) -> list[str]:
+    if not text:
+        return []
+    tokens: list[str] = []
+    for part in _NON_ALNUM_RE.split(text):
+        if not part:
+            continue
+        for m in _CAMEL_RE.finditer(part):
+            tok = m.group(0).strip().lower()
+            if tok:
+                tokens.append(tok)
+    return tokens
+
+
+def _keywords_for_chunk(doc, chunk) -> str:
+    seen: set[str] = set()
+    out: list[str] = []
+
+    def add_many(items: list[str]) -> None:
+        for item in items:
+            if not item:
+                continue
+            if item in seen:
+                continue
+            seen.add(item)
+            out.append(item)
+
+    symbol = getattr(chunk, "symbol", "") or ""
+    chunk_type = getattr(chunk, "chunk_type", "") or ""
+
+    # symbol name split by casing
+    add_many(_iter_keyword_tokens(symbol))
+
+    # parent symbol if method
+    if chunk_type == "method" and "." in symbol:
+        parent = symbol.rsplit(".", 1)[0]
+        add_many(_iter_keyword_tokens(parent))
+
+    # relative path segments
+    rel = (getattr(doc, "relative_path", "") or "").replace("\\", "/")
+    for seg in [s for s in rel.split("/") if s and s != "."]:
+        add_many(_iter_keyword_tokens(seg))
+        if "." in seg:
+            add_many(_iter_keyword_tokens(seg.rsplit(".", 1)[0]))
+
+    # tags/category
+    add_many(_iter_keyword_tokens(getattr(doc, "category", "") or ""))
+    for t in getattr(doc, "tags", []) or []:
+        add_many(_iter_keyword_tokens(str(t)))
+
+    return ", ".join(out)
+
+
 def _render_doc_markdown(doc, chunks: list[object]) -> str:
     fence = _fence_language(doc.language)
 
@@ -82,11 +141,24 @@ def _render_doc_markdown(doc, chunks: list[object]) -> str:
         heading = _chunk_heading(getattr(chunk, "chunk_type", ""), getattr(chunk, "symbol", ""))
         lines.append(heading)
         lines.append("")
+        # Deterministic, structural-only metadata per chunk.
+        layer = _bundle_key(doc) or "other"
         start_line = getattr(chunk, "start_line", 1)
         end_line = getattr(chunk, "end_line", start_line)
-        lines.append(f"source: {doc.relative_path} (lines {start_line}-{end_line})")
-        if getattr(chunk, "symbol", ""):
-            lines.append(f"symbol: {chunk.symbol}")
+        chunk_type = getattr(chunk, "chunk_type", "") or ""
+        symbol = getattr(chunk, "symbol", "") or ""
+
+        lines.append(f"- layer: {layer}")
+        lines.append(f"- language: {doc.language}")
+        lines.append(f"- category: {doc.category}")
+        lines.append("- tags: " + ", ".join(doc.tags))
+        lines.append(f"- chunk_type: {chunk_type}")
+        if symbol:
+            lines.append(f"- symbol: {symbol}")
+        lines.append(f"- source: {doc.relative_path} (lines {start_line}-{end_line})")
+        keywords = _keywords_for_chunk(doc, chunk)
+        if keywords:
+            lines.append(f"- keywords: {keywords}")
         lines.append("")
         lines.append(f"```{fence}".rstrip())
         lines.append(getattr(chunk, "text", "").rstrip())
@@ -204,6 +276,53 @@ def _write_repo_index(output_dir: Path, docs: list[object]) -> None:
     out_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
+def _write_symbol_index(output_dir: Path, docs: list[object], chunks_by_path: dict[str, list[object]]) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_path = output_dir / "symbol_index.md"
+
+    doc_by_path: dict[str, object] = {d.relative_path: d for d in docs}
+
+    rows: list[tuple[str, str, str, str, int, int, str, str]] = []
+    for path in sorted(chunks_by_path.keys(), key=lambda p: p.lower()):
+        doc = doc_by_path.get(path)
+        if not doc:
+            continue
+        language = getattr(doc, "language", "") or ""
+        category = getattr(doc, "category", "") or ""
+        tags = ", ".join(getattr(doc, "tags", []) or [])
+        for chunk in chunks_by_path.get(path, []):
+            symbol = getattr(chunk, "symbol", "") or ""
+            chunk_type = getattr(chunk, "chunk_type", "") or ""
+            start_line = int(getattr(chunk, "start_line", 1) or 1)
+            end_line = int(getattr(chunk, "end_line", start_line) or start_line)
+            rows.append((symbol, chunk_type, language, path, start_line, end_line, category, tags))
+
+    # Stable, deterministic sort for symbol lookup.
+    rows.sort(key=lambda r: (r[0].lower(), r[3].lower(), r[4], r[1].lower()))
+
+    lines: list[str] = []
+    lines.append("# symbol_index")
+    lines.append("")
+    lines.append(f"- chunk_count: {len(rows)}")
+    lines.append("")
+    lines.append("## chunks")
+    lines.append("")
+
+    for symbol, chunk_type, language, path, start_line, end_line, category, tags in rows:
+        lines.append(f"- symbol: {symbol}")
+        lines.append(f"  - chunk_type: {chunk_type}")
+        lines.append(f"  - language: {language}")
+        lines.append(f"  - file: {path}")
+        lines.append(f"  - lines: {start_line}-{end_line}")
+        if category:
+            lines.append(f"  - category: {category}")
+        if tags:
+            lines.append(f"  - tags: {tags}")
+        lines.append("")
+
+    out_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
 def main() -> None:
     manifest_path = Path("kb_exports/scan_manifest.json")
     output_dir = Path("kb_exports/openwebui")
@@ -243,6 +362,7 @@ def main() -> None:
         _write_bundles(output_dir, docs, chunks_by_path)
 
     _write_repo_index(output_dir, docs)
+    _write_symbol_index(output_dir, docs, chunks_by_path)
 
     print(f"Loaded {len(docs)} documents")
     print(f"Wrote markdown exports to: {output_dir.resolve()}")
